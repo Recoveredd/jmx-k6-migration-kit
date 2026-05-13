@@ -1,8 +1,18 @@
 # jmx-k6-migration-kit
 
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/Recoveredd/jmx-k6-migration-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Recoveredd/jmx-k6-migration-kit/actions/workflows/ci.yml)
+
 Audit JMeter `.jmx` files and generate safe k6 migration scaffolds with explicit diagnostics.
 
 This package is intentionally not a magic "convert everything" tool. It is a migration assistant for teams that need to understand what is inside a JMeter plan, convert straightforward HTTP samplers, and clearly identify the parts that need manual k6 work.
+
+## Package quality
+
+- TypeScript types are generated from the source.
+- ESM-only package marked as side-effect free for bundlers.
+- CI runs `npm ci`, `typecheck`, `build`, and `test`.
+- Tested on Node.js 20 and 22 with GitHub Actions.
 
 ## Demo
 
