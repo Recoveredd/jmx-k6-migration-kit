@@ -1,0 +1,53 @@
+{
+  "name": "jmx-k6-migration-kit",
+  "version": "0.1.0",
+  "description": "Audit JMeter JMX files and generate safe k6 migration scaffolds with diagnostics.",
+  "type": "module",
+  "sideEffects": false,
+  "license": "MPL-2.0",
+  "author": "Recoveredd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Recoveredd/jmx-k6-migration-kit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Recoveredd/jmx-k6-migration-kit/issues"
+  },
+  "homepage": "https://github.com/Recoveredd/jmx-k6-migration-kit#readme",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "jmx-k6-migrate": "./dist/cli.js"
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.6"
+  }
+}
