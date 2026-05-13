@@ -49,6 +49,8 @@ Options:
 - `--base-url <url>` provides a fallback when HTTP samplers only contain paths.
 - `--strict` exits with code `1` when warnings are present.
 
+Warnings are printed with the component name and JMeter tree path. The generated script also includes a `Migration warnings` comment block and request-level TODO comments so unsupported or partially converted pieces are visible before the script is run.
+
 ## API
 
 ### `analyzeJmx(input, options?)`

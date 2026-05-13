@@ -287,6 +287,7 @@ export function generateK6Script(
   const unsupportedSummary = analysis.components
     .filter((component) => component.enabled && component.support === 'unsupported')
     .map((component) => `// - ${component.type}: ${component.name} (${component.path})`);
+  const migrationWarnings = findings.filter((finding) => finding.severity === 'warning');
 
   const lines: string[] = [
     "import http from 'k6/http';",
@@ -299,6 +300,14 @@ export function generateK6Script(
 
   if (options.includeUnsupportedSummary !== false && unsupportedSummary.length > 0) {
     lines.push('', '// JMeter elements requiring manual migration:', ...unsupportedSummary);
+  }
+
+  if (migrationWarnings.length > 0) {
+    lines.push(
+      '',
+      '// Migration warnings:',
+      ...migrationWarnings.map((finding) => `// - ${formatFindingForComment(finding)}`)
+    );
   }
 
   lines.push('', 'export default function () {');
@@ -1104,6 +1113,13 @@ function buildK6Params(headers: Record<string, string>): string {
 function formatSeconds(milliseconds: number): string {
   const seconds = milliseconds / 1000;
   return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatFindingForComment(finding: JmxFinding): string {
+  const context = [finding.component, finding.path].filter(Boolean).join(' at ');
+  return context
+    ? `[${finding.code}] ${context}: ${finding.message}`
+    : `[${finding.code}] ${finding.message}`;
 }
 
 function quoteJs(value: string): string {

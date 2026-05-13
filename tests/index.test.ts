@@ -108,6 +108,11 @@ describe('analyzeJmx', () => {
     expect(analysis.ok).toBe(true);
     expect(analysis.summary.partialComponents).toBeGreaterThanOrEqual(2);
     expect(analysis.findings.some((finding) => finding.code === 'csv-dataset-partial')).toBe(true);
+
+    const result = generateK6Script(analysis);
+    expect(result.script).toContain('// Migration warnings:');
+    expect(result.script).toContain('[csv-dataset-partial] Users CSV');
+    expect(result.script).toContain('TODO: migrate CSV data set users.csv');
   });
 
   it('keeps disabled HTTP samplers in the audit but excludes them from conversion', () => {
@@ -376,6 +381,8 @@ describe('generateK6Script', () => {
     const result = generateK6Script(analysis);
 
     expect(analysis.findings.some((finding) => finding.code === 'assertion-partial')).toBe(true);
+    expect(result.script).toContain('// Migration warnings:');
+    expect(result.script).toContain('[assertion-partial] Not 500');
     expect(result.script).toContain('TODO: manually migrate response assertion "Not 500"');
   });
 

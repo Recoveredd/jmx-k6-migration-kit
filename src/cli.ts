@@ -104,7 +104,9 @@ function printSummary(analysisFindings: JmxFinding[], generationFindings: JmxFin
   console.log(`JMX migration audit: ${errors} error(s), ${warnings} warning(s), ${info} info item(s)`);
 
   for (const finding of findings) {
-    console.log(`${finding.severity.toUpperCase()} ${finding.code}: ${finding.message}`);
+    const context = [finding.component, finding.path].filter(Boolean).join(' at ');
+    const suffix = context ? ` (${context})` : '';
+    console.log(`${finding.severity.toUpperCase()} ${finding.code}${suffix}: ${finding.message}`);
   }
 }
 
