@@ -2,6 +2,16 @@
   "name": "jmx-k6-migration-kit",
   "version": "0.1.0",
   "description": "Audit JMeter JMX files and generate safe k6 migration scaffolds with diagnostics.",
+  "keywords": [
+    "jmeter",
+    "k6",
+    "load-testing",
+    "migration",
+    "performance-testing",
+    "typescript",
+    "cli",
+    "developer-tools"
+  ],
   "type": "module",
   "sideEffects": false,
   "license": "MPL-2.0",
