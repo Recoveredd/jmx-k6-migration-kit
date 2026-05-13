@@ -82,6 +82,54 @@ describe('analyzeJmx', () => {
     expect(analysis.findings.some((finding) => finding.code === 'unsupported-component')).toBe(true);
     expect(analysis.httpRequests).toHaveLength(1);
   });
+
+  it('returns a structured error when the XML is valid but not a JMeter plan', () => {
+    const analysis = analyzeJmx('<project><name>not jmeter</name></project>');
+
+    expect(analysis.ok).toBe(false);
+    expect(analysis.findings[0]?.code).toBe('missing-jmeter-root');
+  });
+
+  it('detects CSV data sets as manual migration work', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="Users CSV" enabled="true">
+        <stringProp name="filename">users.csv</stringProp>
+        <stringProp name="variableNames">email,password</stringProp>
+      </CSVDataSet>
+      <hashTree/>
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Login" enabled="true">
+        <stringProp name="HTTPSampler.domain">auth.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/login</stringProp>
+        <stringProp name="HTTPSampler.method">POST</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+
+    expect(analysis.ok).toBe(true);
+    expect(analysis.summary.partialComponents).toBeGreaterThanOrEqual(2);
+    expect(analysis.findings.some((finding) => finding.code === 'csv-dataset-partial')).toBe(true);
+  });
+
+  it('keeps disabled HTTP samplers in the audit but excludes them from conversion', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Old endpoint" enabled="false">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/old</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Current endpoint" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/current</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+
+    expect(analysis.summary.httpRequests).toBe(2);
+    expect(analysis.summary.convertibleHttpRequests).toBe(1);
+    expect(analysis.findings.some((finding) => finding.code === 'disabled-component')).toBe(true);
+  });
 });
 
 describe('generateK6Script', () => {
@@ -114,4 +162,64 @@ describe('generateK6Script', () => {
     expect(result.script).toContain('http.del(url, null,');
     expect(result.script).not.toContain('http.delete');
   });
+
+  it('generates POST requests with raw bodies', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Create user" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/users</stringProp>
+        <stringProp name="HTTPSampler.method">POST</stringProp>
+        <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+        <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <collectionProp name="Arguments.arguments">
+            <elementProp name="" elementType="HTTPArgument">
+              <boolProp name="HTTPArgument.always_encode">false</boolProp>
+              <stringProp name="Argument.value">{"name":"Ada"}</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+          </collectionProp>
+        </elementProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(result.ok).toBe(true);
+    expect(result.script).toContain('const body = "{\\"name\\":\\"Ada\\"}";');
+    expect(result.script).toContain('http.post(url, body,');
+  });
+
+  it('fails generation clearly when no enabled HTTP request exists', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think time" enabled="true">
+        <stringProp name="ConstantTimer.delay">1000</stringProp>
+      </ConstantTimer>
+      <hashTree/>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings.some((finding) => finding.code === 'no-enabled-http-requests')).toBe(true);
+  });
 });
+
+function withThreadChildren(children: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Fixture" enabled="true"/>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">2</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">5</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        ${children}
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>`;
+}
