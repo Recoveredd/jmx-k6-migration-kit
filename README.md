@@ -4,6 +4,10 @@ Audit JMeter `.jmx` files and generate safe k6 migration scaffolds with explicit
 
 This package is intentionally not a magic "convert everything" tool. It is a migration assistant for teams that need to understand what is inside a JMeter plan, convert straightforward HTTP samplers, and clearly identify the parts that need manual k6 work.
 
+## Demo
+
+[Try the interactive demo](https://packages.wasta-wocket.fr/jmx-k6-migration-kit/)
+
 ```ts
 import { migrateJmxToK6 } from "jmx-k6-migration-kit";
 
