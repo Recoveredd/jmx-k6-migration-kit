@@ -89,6 +89,7 @@ interface ScopedConfig {
   headers: Record<string, string>;
   variables: Record<string, string>;
   csvDataSets: string[];
+  httpDefaults: HttpDefaults;
 }
 
 interface ElementPair {
@@ -96,10 +97,19 @@ interface ElementPair {
   subtree?: XmlNode;
 }
 
+interface HttpDefaults {
+  protocol?: string;
+  domain?: string;
+  port?: string;
+  path?: string;
+  method?: string;
+}
+
 const SUPPORTED_TAGS = new Set([
   'jmeterTestPlan',
   'hashTree',
   'TestPlan',
+  'ConfigTestElement',
   'ThreadGroup',
   'LoopController',
   'HTTPSamplerProxy',
@@ -115,6 +125,7 @@ const SUPPORTED_TAGS = new Set([
 ]);
 
 const HTTP_METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const JMX_FORM_BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 export function analyzeJmx(input: string, options: JmxAnalysisOptions = {}): JmxAnalysisResult {
   const sourceName = options.sourceName ?? 'jmeter-plan.jmx';
@@ -386,19 +397,29 @@ function extractHttpRequest(
   context: { config: ScopedConfig; enabled: boolean; name: string; path: string }
 ): HttpRequestPlan {
   const args = extractArguments(element);
-  const query = args.mode === 'query' ? args.values : {};
-  const body = args.mode === 'body' ? args.body : getTextProp(element, 'HTTPSampler.postBodyRaw') === 'true' ? args.body : undefined;
-  const method = (getTextProp(element, 'HTTPSampler.method') || 'GET').toUpperCase();
+  const method = (getTextProp(element, 'HTTPSampler.method') || context.config.httpDefaults.method || 'GET').toUpperCase();
+  const headers = { ...context.config.headers };
+  const shouldSendArgumentsAsBody = args.mode === 'query' && JMX_FORM_BODY_METHODS.has(method) && Object.keys(args.values).length > 0;
+  const query = args.mode === 'query' && !shouldSendArgumentsAsBody ? args.values : {};
+  const body = args.mode === 'body'
+    ? args.body
+    : shouldSendArgumentsAsBody
+      ? new URLSearchParams(args.values).toString()
+      : undefined;
+
+  if (shouldSendArgumentsAsBody && !hasHeader(headers, 'Content-Type')) {
+    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+  }
 
   return {
     name: context.name,
     method,
-    protocol: optionalString(getTextProp(element, 'HTTPSampler.protocol')),
-    domain: optionalString(getTextProp(element, 'HTTPSampler.domain')),
-    port: optionalString(getTextProp(element, 'HTTPSampler.port')),
-    path: normalizePath(getTextProp(element, 'HTTPSampler.path') || '/'),
+    protocol: optionalString(getTextProp(element, 'HTTPSampler.protocol')) ?? context.config.httpDefaults.protocol,
+    domain: optionalString(getTextProp(element, 'HTTPSampler.domain')) ?? context.config.httpDefaults.domain,
+    port: optionalString(getTextProp(element, 'HTTPSampler.port')) ?? context.config.httpDefaults.port,
+    path: normalizePath(optionalString(getTextProp(element, 'HTTPSampler.path')) ?? context.config.httpDefaults.path ?? '/'),
     query,
-    headers: context.config.headers,
+    headers,
     body,
     enabled: context.enabled,
     sourcePath: context.path
@@ -425,6 +446,10 @@ function collectScopedConfig(pairs: ElementPair[]): ScopedConfig {
 
     if (type === 'HeaderManager') {
       Object.assign(config.headers, extractHeaders(pair.element));
+    }
+
+    if (type === 'ConfigTestElement') {
+      config.httpDefaults = mergeHttpDefaults(config.httpDefaults, extractHttpDefaults(pair.element));
     }
 
     if (type === 'Arguments') {
@@ -454,6 +479,16 @@ function extractHeaders(element: XmlNode): Record<string, string> {
   }
 
   return headers;
+}
+
+function extractHttpDefaults(element: XmlNode): HttpDefaults {
+  return compactHttpDefaults({
+    protocol: optionalString(getTextProp(element, 'HTTPSampler.protocol')),
+    domain: optionalString(getTextProp(element, 'HTTPSampler.domain')),
+    port: optionalString(getTextProp(element, 'HTTPSampler.port')),
+    path: optionalString(getTextProp(element, 'HTTPSampler.path')),
+    method: optionalString(getTextProp(element, 'HTTPSampler.method'))?.toUpperCase()
+  });
 }
 
 function extractArguments(element: XmlNode): { mode: 'query' | 'body'; values: Record<string, string>; body?: string } {
@@ -615,7 +650,13 @@ function isRecord(value: unknown): value is XmlNode {
 }
 
 function classifySupport(type: string): SupportLevel {
-  if (type === 'HTTPSamplerProxy' || type === 'HTTPSampler' || type === 'HeaderManager' || type === 'Arguments') {
+  if (
+    type === 'HTTPSamplerProxy'
+    || type === 'HTTPSampler'
+    || type === 'HeaderManager'
+    || type === 'Arguments'
+    || type === 'ConfigTestElement'
+  ) {
     return 'supported';
   }
 
@@ -638,7 +679,8 @@ function emptyConfig(): ScopedConfig {
   return {
     headers: {},
     variables: {},
-    csvDataSets: []
+    csvDataSets: [],
+    httpDefaults: {}
   };
 }
 
@@ -646,8 +688,19 @@ function mergeConfig(base: ScopedConfig, next: ScopedConfig): ScopedConfig {
   return {
     headers: { ...base.headers, ...next.headers },
     variables: { ...base.variables, ...next.variables },
-    csvDataSets: [...base.csvDataSets, ...next.csvDataSets]
+    csvDataSets: [...base.csvDataSets, ...next.csvDataSets],
+    httpDefaults: mergeHttpDefaults(base.httpDefaults, next.httpDefaults)
   };
+}
+
+function mergeHttpDefaults(base: HttpDefaults, next: HttpDefaults): HttpDefaults {
+  return compactHttpDefaults({ ...base, ...next });
+}
+
+function compactHttpDefaults(defaults: HttpDefaults): HttpDefaults {
+  return Object.fromEntries(
+    Object.entries(defaults).filter(([, value]) => value !== undefined && value !== '')
+  ) as HttpDefaults;
 }
 
 function summarize(components: JmxComponent[], httpRequests: HttpRequestPlan[]): JmxAnalysisSummary {
@@ -686,6 +739,10 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 function optionalString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  return Object.keys(headers).some((headerName) => headerName.toLowerCase() === name.toLowerCase());
 }
 
 function normalizePath(value: string): string {

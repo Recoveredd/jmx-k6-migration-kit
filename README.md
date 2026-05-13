@@ -98,8 +98,9 @@ The goal is reliable partial migration, not full JMeter emulation.
 | JMeter element | Support | Notes |
 | --- | --- | --- |
 | `HTTPSamplerProxy`, `HTTPSampler` | Supported | Generates `http.get/post/put/patch/delete` calls with URL, query params, body and scoped headers. |
+| `HTTP Request Defaults` / `ConfigTestElement` | Supported | Applies default protocol, domain, port, path and method within the current JMeter tree scope. |
 | `HeaderManager` | Supported | Headers are applied through JMeter tree scope where possible. |
-| `Arguments` | Supported | Query parameters and raw body arguments are extracted for HTTP samplers. |
+| `Arguments` | Supported | `GET`/`DELETE` parameters become URL query params; `POST`/`PUT`/`PATCH` parameters become form bodies unless JMeter raw body mode is used. |
 | `ThreadGroup` | Partial | `vus`, loops and ramp-up are converted into simple k6 options. Review complex schedules manually. |
 | `CSVDataSet` | Partial | Detected and reported, but shared arrays and `open()` loading must be reviewed manually. |
 | `ResponseAssertion` | Partial | Detected and reported. Recreate assertions with k6 `check()`. |

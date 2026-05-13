@@ -130,6 +130,38 @@ describe('analyzeJmx', () => {
     expect(analysis.summary.convertibleHttpRequests).toBe(1);
     expect(analysis.findings.some((finding) => finding.code === 'disabled-component')).toBe(true);
   });
+
+  it('applies HTTP Request Defaults from the current JMeter scope', () => {
+    const analysis = analyzeJmx(withPlanChildren(`
+      <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.defaults.test</stringProp>
+        <stringProp name="HTTPSampler.protocol">https</stringProp>
+        <stringProp name="HTTPSampler.port">8443</stringProp>
+      </ConfigTestElement>
+      <hashTree/>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">1</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">1</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="From defaults" enabled="true">
+          <stringProp name="HTTPSampler.path">/from-defaults</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+    `));
+
+    expect(analysis.httpRequests[0]).toMatchObject({
+      domain: 'api.defaults.test',
+      protocol: 'https',
+      port: '8443',
+      path: '/from-defaults'
+    });
+  });
 });
 
 describe('generateK6Script', () => {
@@ -189,6 +221,36 @@ describe('generateK6Script', () => {
     expect(result.script).toContain('http.post(url, body,');
   });
 
+  it('sends POST parameters as form body instead of query string', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Submit form" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/submit</stringProp>
+        <stringProp name="HTTPSampler.method">POST</stringProp>
+        <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+          <collectionProp name="Arguments.arguments">
+            <elementProp name="email" elementType="HTTPArgument">
+              <stringProp name="Argument.name">email</stringProp>
+              <stringProp name="Argument.value">ada@example.test</stringProp>
+            </elementProp>
+            <elementProp name="plan" elementType="HTTPArgument">
+              <stringProp name="Argument.name">plan</stringProp>
+              <stringProp name="Argument.value">pro</stringProp>
+            </elementProp>
+          </collectionProp>
+        </elementProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(analysis.httpRequests[0]?.query).toEqual({});
+    expect(analysis.httpRequests[0]?.body).toBe('email=ada%40example.test&plan=pro');
+    expect(result.script).toContain('const body = "email=ada%40example.test&plan=pro";');
+    expect(result.script).toContain('"Content-Type": "application/x-www-form-urlencoded"');
+    expect(result.script).not.toContain('/submit?email=');
+  });
+
   it('fails generation clearly when no enabled HTTP request exists', () => {
     const analysis = analyzeJmx(withThreadChildren(`
       <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think time" enabled="true">
@@ -204,21 +266,27 @@ describe('generateK6Script', () => {
 });
 
 function withThreadChildren(children: string): string {
+  return withPlanChildren(`
+    <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
+      <stringProp name="ThreadGroup.num_threads">2</stringProp>
+      <stringProp name="ThreadGroup.ramp_time">5</stringProp>
+      <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+        <stringProp name="LoopController.loops">1</stringProp>
+      </elementProp>
+    </ThreadGroup>
+    <hashTree>
+      ${children}
+    </hashTree>
+  `);
+}
+
+function withPlanChildren(children: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Fixture" enabled="true"/>
     <hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
-        <stringProp name="ThreadGroup.num_threads">2</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">5</stringProp>
-        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
-          <stringProp name="LoopController.loops">1</stringProp>
-        </elementProp>
-      </ThreadGroup>
-      <hashTree>
-        ${children}
-      </hashTree>
+      ${children}
     </hashTree>
   </hashTree>
 </jmeterTestPlan>`;
