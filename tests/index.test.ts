@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeJmx, generateK6Script, migrateJmxToK6 } from '../src/index.js';
+import { analyzeJmx, formatMigrationReport, generateK6Script, migrateJmxToK6 } from '../src/index.js';
 
 const sampleJmx = `<?xml version="1.0" encoding="UTF-8"?>
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
@@ -397,6 +397,31 @@ describe('generateK6Script', () => {
 
     expect(result.ok).toBe(false);
     expect(result.findings.some((finding) => finding.code === 'no-enabled-http-requests')).toBe(true);
+  });
+});
+
+describe('formatMigrationReport', () => {
+  it('creates a human-readable migration report for professional review', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="Users CSV" enabled="true">
+        <stringProp name="filename">users.csv</stringProp>
+      </CSVDataSet>
+      <hashTree/>
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Login" enabled="true">
+        <stringProp name="HTTPSampler.domain">auth.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/login</stringProp>
+        <stringProp name="HTTPSampler.method">POST</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `), { sourceName: 'login.jmx' });
+    const k6 = generateK6Script(analysis);
+    const report = formatMigrationReport({ analysis, k6 });
+
+    expect(report).toContain('# JMX migration report: login.jmx');
+    expect(report).toContain('HTTP requests: 1/1 convertible');
+    expect(report).toContain('| Login | POST | https://auth.example.test/login | yes |');
+    expect(report).toContain('**WARNING csv-dataset-partial**');
+    expect(report).toContain('Recommended Next Steps');
   });
 });
 

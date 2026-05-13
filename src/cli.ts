@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { analyzeJmx, generateK6Script, type JmxFinding } from './index.js';
+import { analyzeJmx, formatMigrationReport, generateK6Script, type JmxFinding } from './index.js';
 
 interface CliOptions {
   input?: string;
   out?: string;
   report?: string;
+  reportFormat: 'json' | 'markdown';
   baseUrl?: string;
   strict: boolean;
   help: boolean;
@@ -41,10 +42,13 @@ async function main(): Promise<void> {
   }
 
   if (options.report) {
-    await writeFile(options.report, `${JSON.stringify(report, null, 2)}\n`);
+    const output = options.reportFormat === 'markdown'
+      ? formatMigrationReport({ analysis, k6 })
+      : `${JSON.stringify(report, null, 2)}\n`;
+    await writeFile(options.report, output);
   }
 
-  printSummary(analysis.findings, k6.findings);
+  printSummary(analysis, k6.findings);
 
   const hasErrors = !analysis.ok || !k6.ok;
   const hasWarnings = [...analysis.findings, ...k6.findings].some((finding) => finding.severity === 'warning');
@@ -55,7 +59,7 @@ async function main(): Promise<void> {
 }
 
 function parseArgs(args: string[]): CliOptions {
-  const options: CliOptions = { strict: false, help: false };
+  const options: CliOptions = { reportFormat: 'json', strict: false, help: false };
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -66,6 +70,8 @@ function parseArgs(args: string[]): CliOptions {
       options.out = requireValue(args, (index += 1), '--out');
     } else if (arg === '--report') {
       options.report = requireValue(args, (index += 1), '--report');
+    } else if (arg === '--report-format') {
+      options.reportFormat = parseReportFormat(requireValue(args, (index += 1), '--report-format'));
     } else if (arg === '--base-url') {
       options.baseUrl = requireValue(args, (index += 1), '--base-url');
     } else if (arg === '--strict') {
@@ -80,6 +86,14 @@ function parseArgs(args: string[]): CliOptions {
   return options;
 }
 
+function parseReportFormat(value: string): 'json' | 'markdown' {
+  if (value === 'json' || value === 'markdown') {
+    return value;
+  }
+
+  throw new Error('--report-format must be "json" or "markdown".');
+}
+
 function requireValue(args: string[], index: number, flag: string): string {
   const value = args[index];
   if (!value) {
@@ -89,10 +103,13 @@ function requireValue(args: string[], index: number, flag: string): string {
   return value;
 }
 
-function printSummary(analysisFindings: JmxFinding[], generationFindings: JmxFinding[]): void {
+function printSummary(
+  analysis: { summary: { totalComponents: number; httpRequests: number; convertibleHttpRequests: number; partialComponents: number; unsupportedComponents: number }; findings: JmxFinding[] },
+  generationFindings: JmxFinding[]
+): void {
   const findingsByCode = new Map<string, JmxFinding>();
 
-  for (const finding of [...analysisFindings, ...generationFindings]) {
+  for (const finding of [...analysis.findings, ...generationFindings]) {
     findingsByCode.set(`${finding.code}:${finding.path ?? ''}:${finding.component ?? ''}`, finding);
   }
 
@@ -102,6 +119,8 @@ function printSummary(analysisFindings: JmxFinding[], generationFindings: JmxFin
   const info = findings.filter((finding) => finding.severity === 'info').length;
 
   console.log(`JMX migration audit: ${errors} error(s), ${warnings} warning(s), ${info} info item(s)`);
+  console.log(`Components: ${analysis.summary.totalComponents} total, ${analysis.summary.partialComponents} partial, ${analysis.summary.unsupportedComponents} unsupported`);
+  console.log(`HTTP requests: ${analysis.summary.convertibleHttpRequests}/${analysis.summary.httpRequests} convertible`);
 
   for (const finding of findings) {
     const context = [finding.component, finding.path].filter(Boolean).join(' at ');
@@ -115,7 +134,8 @@ function printHelp(): void {
 
 Options:
   --out <file>        Write the generated k6 scaffold.
-  --report <file>     Write a JSON migration report.
+  --report <file>     Write a migration report.
+  --report-format     Report format: json or markdown. Defaults to json.
   --base-url <url>    Fallback BASE_URL when samplers only contain paths.
   --strict            Exit with code 1 when warnings are present.
   -h, --help          Show this help.

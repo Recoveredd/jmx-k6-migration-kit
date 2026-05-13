@@ -38,14 +38,16 @@ npm install jmx-k6-migration-kit
 ```bash
 npx jmx-k6-migrate ./load-test.jmx \
   --out ./load-test.k6.js \
-  --report ./migration-report.json \
+  --report ./migration-report.md \
+  --report-format markdown \
   --base-url https://api.example.com
 ```
 
 Options:
 
 - `--out <file>` writes the generated k6 scaffold.
-- `--report <file>` writes the full JSON audit report.
+- `--report <file>` writes the full migration report.
+- `--report-format json|markdown` selects report output. Defaults to `json`.
 - `--base-url <url>` provides a fallback when HTTP samplers only contain paths.
 - `--strict` exits with code `1` when warnings are present.
 
@@ -91,6 +93,14 @@ Convenience helper that runs both steps.
 
 ```ts
 const { analysis, k6 } = migrateJmxToK6(jmxXml);
+```
+
+### `formatMigrationReport({ analysis, k6? })`
+
+Creates a Markdown report meant for pull requests, migration tickets and handoff notes.
+
+```ts
+const report = formatMigrationReport({ analysis, k6 });
 ```
 
 ## Supported scope

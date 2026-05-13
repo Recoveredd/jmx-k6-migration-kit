@@ -94,6 +94,11 @@ export interface MigrationResult {
   k6: K6GenerationResult;
 }
 
+export interface MigrationReportInput {
+  analysis: JmxAnalysisResult;
+  k6?: K6GenerationResult;
+}
+
 interface ScopedConfig {
   headers: Record<string, string>;
   variables: Record<string, string>;
@@ -354,6 +359,74 @@ export function migrateJmxToK6(
     analysis,
     k6: generateK6Script(analysis, options)
   };
+}
+
+export function formatMigrationReport(input: MigrationReportInput): string {
+  const { analysis, k6 } = input;
+  const findings = dedupeFindings([...(analysis.findings ?? []), ...(k6?.findings ?? [])]);
+  const warnings = findings.filter((finding) => finding.severity === 'warning');
+  const errors = findings.filter((finding) => finding.severity === 'error');
+  const info = findings.filter((finding) => finding.severity === 'info');
+  const unsupported = analysis.components.filter((component) => component.enabled && component.support === 'unsupported');
+  const partial = analysis.components.filter((component) => component.enabled && component.support === 'partial');
+  const disabled = analysis.components.filter((component) => !component.enabled);
+
+  const lines = [
+    `# JMX migration report: ${analysis.sourceName}`,
+    '',
+    '## Summary',
+    '',
+    `- Status: ${analysis.ok && (k6?.ok ?? true) ? 'ready with review' : 'blocked'}`,
+    `- Components: ${analysis.summary.totalComponents}`,
+    `- HTTP requests: ${analysis.summary.convertibleHttpRequests}/${analysis.summary.httpRequests} convertible`,
+    `- Supported components: ${analysis.summary.supportedComponents}`,
+    `- Partial components: ${analysis.summary.partialComponents}`,
+    `- Unsupported components: ${analysis.summary.unsupportedComponents}`,
+    `- Disabled components: ${analysis.summary.disabledComponents}`,
+    `- Findings: ${errors.length} error(s), ${warnings.length} warning(s), ${info.length} info item(s)`,
+    '',
+    '## HTTP Requests',
+    '',
+    ...formatHttpRequestRows(analysis.httpRequests),
+    '',
+    '## Manual Review',
+    ''
+  ];
+
+  if (findings.length === 0) {
+    lines.push('No migration findings.');
+  } else {
+    lines.push(...findings.map((finding) => `- **${finding.severity.toUpperCase()} ${finding.code}**${formatFindingContext(finding)}: ${finding.message}`));
+  }
+
+  lines.push('', '## Partial And Unsupported Components', '');
+
+  if (partial.length === 0 && unsupported.length === 0 && disabled.length === 0) {
+    lines.push('No partial, unsupported or disabled components detected.');
+  } else {
+    lines.push(
+      ...partial.map((component) => `- **Partial** ${component.type}: ${component.name} (${component.path})`),
+      ...unsupported.map((component) => `- **Unsupported** ${component.type}: ${component.name} (${component.path})`),
+      ...disabled.map((component) => `- **Disabled** ${component.type}: ${component.name} (${component.path})`)
+    );
+  }
+
+  lines.push('', '## Recommended Next Steps', '');
+
+  if (errors.length > 0) {
+    lines.push('- Fix blocking errors before using the generated k6 script.');
+  }
+
+  if (warnings.length > 0) {
+    lines.push('- Review every warning before running the script outside a safe environment.');
+  }
+
+  lines.push(
+    '- Run the generated k6 script against a non-production target first.',
+    '- Compare request count, response status checks and business assertions with the original JMeter run.'
+  );
+
+  return `${lines.join('\n')}\n`;
 }
 
 function walkHashTree(
@@ -1120,6 +1193,59 @@ function formatFindingForComment(finding: JmxFinding): string {
   return context
     ? `[${finding.code}] ${context}: ${finding.message}`
     : `[${finding.code}] ${finding.message}`;
+}
+
+function dedupeFindings(findings: JmxFinding[]): JmxFinding[] {
+  return [...new Map(
+    findings.map((finding) => [
+      `${finding.severity}:${finding.code}:${finding.component ?? ''}:${finding.path ?? ''}:${finding.message}`,
+      finding
+    ])
+  ).values()];
+}
+
+function formatFindingContext(finding: JmxFinding): string {
+  const context = [finding.component, finding.path].filter(Boolean).join(' at ');
+  return context ? ` (${context})` : '';
+}
+
+function formatHttpRequestRows(requests: HttpRequestPlan[]): string[] {
+  if (requests.length === 0) {
+    return ['No HTTP request detected.'];
+  }
+
+  return [
+    '| Name | Method | URL | Converted | Checks | Delay |',
+    '| --- | --- | --- | --- | ---: | ---: |',
+    ...requests.map((request) => [
+      escapeMarkdownCell(request.name),
+      request.method,
+      escapeMarkdownCell(formatRequestUrl(request)),
+      request.enabled ? 'yes' : 'no',
+      String(request.checks.length),
+      request.delayMs > 0 ? `${formatSeconds(request.delayMs)}s` : '-'
+    ].join(' | ')).map((row) => `| ${row} |`)
+  ];
+}
+
+function formatRequestUrl(request: HttpRequestPlan): string {
+  const pathWithQuery = appendQuery(request.path, request.query);
+
+  if (pathWithQuery.startsWith('http://') || pathWithQuery.startsWith('https://')) {
+    return pathWithQuery;
+  }
+
+  if (request.domain) {
+    const protocol = request.protocol || 'https';
+    const port = request.port ? `:${request.port}` : '';
+    return `${protocol}://${request.domain}${port}${pathWithQuery}`;
+  }
+
+  return `BASE_URL${pathWithQuery}`;
+}
+
+function escapeMarkdownCell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
 function quoteJs(value: string): string {
