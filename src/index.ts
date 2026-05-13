@@ -41,7 +41,16 @@ export interface HttpRequestPlan {
   query: Record<string, string>;
   headers: Record<string, string>;
   body?: string;
+  delayMs: number;
+  checks: K6CheckPlan[];
+  migrationNotes: string[];
   enabled: boolean;
+  sourcePath: string;
+}
+
+export interface K6CheckPlan {
+  label: string;
+  expression: string;
   sourcePath: string;
 }
 
@@ -90,6 +99,9 @@ interface ScopedConfig {
   variables: Record<string, string>;
   csvDataSets: string[];
   httpDefaults: HttpDefaults;
+  constantDelayMs: number;
+  assertions: ResponseAssertionPlan[];
+  migrationNotes: string[];
 }
 
 interface ElementPair {
@@ -104,6 +116,18 @@ interface HttpDefaults {
   path?: string;
   method?: string;
 }
+
+interface ResponseAssertionPlan {
+  name: string;
+  field: string;
+  rule: AssertionRule;
+  patterns: string[];
+  supported: boolean;
+  sourcePath: string;
+  note?: string;
+}
+
+type AssertionRule = 'contains' | 'matches' | 'equals' | 'substring' | 'unsupported';
 
 const SUPPORTED_TAGS = new Set([
   'jmeterTestPlan',
@@ -218,6 +242,16 @@ export function analyzeJmx(input: string, options: JmxAnalysisOptions = {}): Jmx
         message: 'HTTP sampler has no domain. The generated k6 script will use BASE_URL for this request.'
       });
     }
+
+    if (requestHasUnresolvedVariables(request)) {
+      findings.push({
+        code: 'unresolved-variable',
+        severity: 'warning',
+        component: request.name,
+        path: request.sourcePath,
+        message: 'HTTP sampler still contains JMeter variables. Only statically defined variables are replaced automatically.'
+      });
+    }
   }
 
   return {
@@ -272,7 +306,14 @@ export function generateK6Script(
   for (const request of enabledRequests) {
     const url = buildK6UrlExpression(request);
     const params = buildK6Params(request.headers);
-    const requestLines = [`  const url = ${url};`];
+    const requestLines = request.migrationNotes.map((note) => `  // ${note}`);
+
+    if (request.delayMs > 0) {
+      requestLines.push(`  sleep(${formatSeconds(request.delayMs)});`);
+    }
+
+    requestLines.push(`  const url = ${url};`);
+
     const body = request.body;
     const hasBody = HTTP_METHODS_WITH_BODY.has(request.method) && body !== undefined;
 
@@ -281,10 +322,7 @@ export function generateK6Script(
     }
 
     requestLines.push(`  const response = ${formatK6HttpCall(request.method, hasBody, params)};`);
-    requestLines.push(
-      "  check(response, { 'status is below 400': (result) => result.status < 400 });",
-      '  sleep(1);'
-    );
+    requestLines.push(formatK6Checks(request.checks));
 
     lines.push(`  group(${quoteJs(request.name)}, () => {`, ...requestLines, '  });');
   }
@@ -372,14 +410,27 @@ function walkHashTree(
       });
     }
 
-    if (type === 'ResponseAssertion') {
+    if (type.endsWith('Timer') && type !== 'ConstantTimer') {
       context.findings.push({
-        code: 'assertion-partial',
+        code: 'timer-partial',
         severity: 'warning',
         component: name,
         path,
-        message: 'Response assertions are detected but not translated automatically. Recreate them with k6 check().'
+        message: `${type} is detected but not converted. Only ConstantTimer has guaranteed conversion.`
       });
+    }
+
+    if (type === 'ResponseAssertion') {
+      const assertion = extractResponseAssertion(pair.element, path);
+      if (!assertion.supported) {
+        context.findings.push({
+          code: 'assertion-partial',
+          severity: 'warning',
+          component: name,
+          path,
+          message: 'Response assertion is outside the guaranteed conversion scope. Recreate it manually with k6 check().'
+        });
+      }
     }
 
     if (pair.subtree) {
@@ -397,14 +448,19 @@ function extractHttpRequest(
   context: { config: ScopedConfig; enabled: boolean; name: string; path: string }
 ): HttpRequestPlan {
   const args = extractArguments(element);
-  const method = (getTextProp(element, 'HTTPSampler.method') || context.config.httpDefaults.method || 'GET').toUpperCase();
-  const headers = { ...context.config.headers };
+  const method = replaceKnownVariables(
+    getTextProp(element, 'HTTPSampler.method') || context.config.httpDefaults.method || 'GET',
+    context.config.variables
+  ).toUpperCase();
+  const headers = replaceRecordVariables(context.config.headers, context.config.variables);
   const shouldSendArgumentsAsBody = args.mode === 'query' && JMX_FORM_BODY_METHODS.has(method) && Object.keys(args.values).length > 0;
-  const query = args.mode === 'query' && !shouldSendArgumentsAsBody ? args.values : {};
+  const query = args.mode === 'query' && !shouldSendArgumentsAsBody
+    ? replaceRecordVariables(args.values, context.config.variables)
+    : {};
   const body = args.mode === 'body'
-    ? args.body
+    ? replaceKnownVariables(args.body ?? '', context.config.variables)
     : shouldSendArgumentsAsBody
-      ? new URLSearchParams(args.values).toString()
+      ? new URLSearchParams(replaceRecordVariables(args.values, context.config.variables)).toString()
       : undefined;
 
   if (shouldSendArgumentsAsBody && !hasHeader(headers, 'Content-Type')) {
@@ -414,13 +470,16 @@ function extractHttpRequest(
   return {
     name: context.name,
     method,
-    protocol: optionalString(getTextProp(element, 'HTTPSampler.protocol')) ?? context.config.httpDefaults.protocol,
-    domain: optionalString(getTextProp(element, 'HTTPSampler.domain')) ?? context.config.httpDefaults.domain,
-    port: optionalString(getTextProp(element, 'HTTPSampler.port')) ?? context.config.httpDefaults.port,
-    path: normalizePath(optionalString(getTextProp(element, 'HTTPSampler.path')) ?? context.config.httpDefaults.path ?? '/'),
+    protocol: resolveRequestValue(getTextProp(element, 'HTTPSampler.protocol'), context.config.httpDefaults.protocol, context.config.variables),
+    domain: resolveRequestValue(getTextProp(element, 'HTTPSampler.domain'), context.config.httpDefaults.domain, context.config.variables),
+    port: resolveRequestValue(getTextProp(element, 'HTTPSampler.port'), context.config.httpDefaults.port, context.config.variables),
+    path: normalizePath(resolveRequestValue(getTextProp(element, 'HTTPSampler.path'), context.config.httpDefaults.path, context.config.variables) ?? '/'),
     query,
     headers,
     body,
+    delayMs: context.config.constantDelayMs,
+    checks: context.config.assertions.flatMap(assertionToK6Checks),
+    migrationNotes: context.config.migrationNotes,
     enabled: context.enabled,
     sourcePath: context.path
   };
@@ -444,22 +503,39 @@ function collectScopedConfig(pairs: ElementPair[]): ScopedConfig {
   for (const pair of pairs) {
     const type = getTagName(pair.element);
 
+    if (type === 'Arguments') {
+      Object.assign(config.variables, extractArguments(pair.element).values);
+    }
+  }
+
+  for (const pair of pairs) {
+    const type = getTagName(pair.element);
+
     if (type === 'HeaderManager') {
       Object.assign(config.headers, extractHeaders(pair.element));
     }
 
     if (type === 'ConfigTestElement') {
-      config.httpDefaults = mergeHttpDefaults(config.httpDefaults, extractHttpDefaults(pair.element));
-    }
-
-    if (type === 'Arguments') {
-      Object.assign(config.variables, extractArguments(pair.element).values);
+      config.httpDefaults = mergeHttpDefaults(config.httpDefaults, extractHttpDefaults(pair.element, config.variables));
     }
 
     if (type === 'CSVDataSet') {
       const filename = optionalString(getTextProp(pair.element, 'filename'));
       if (filename) {
         config.csvDataSets.push(filename);
+        config.migrationNotes.push(`TODO: migrate CSV data set ${filename} with k6 open() or SharedArray.`);
+      }
+    }
+
+    if (type === 'ConstantTimer') {
+      config.constantDelayMs += extractConstantTimerDelay(pair.element);
+    }
+
+    if (type === 'ResponseAssertion') {
+      const assertion = extractResponseAssertion(pair.element, getAttribute(pair.element, '@_testname') ?? 'Response Assertion');
+      config.assertions.push(assertion);
+      if (!assertion.supported && assertion.note) {
+        config.migrationNotes.push(assertion.note);
       }
     }
   }
@@ -481,14 +557,110 @@ function extractHeaders(element: XmlNode): Record<string, string> {
   return headers;
 }
 
-function extractHttpDefaults(element: XmlNode): HttpDefaults {
+function extractHttpDefaults(element: XmlNode, variables: Record<string, string>): HttpDefaults {
   return compactHttpDefaults({
-    protocol: optionalString(getTextProp(element, 'HTTPSampler.protocol')),
-    domain: optionalString(getTextProp(element, 'HTTPSampler.domain')),
-    port: optionalString(getTextProp(element, 'HTTPSampler.port')),
-    path: optionalString(getTextProp(element, 'HTTPSampler.path')),
-    method: optionalString(getTextProp(element, 'HTTPSampler.method'))?.toUpperCase()
+    protocol: optionalString(replaceKnownVariables(getTextProp(element, 'HTTPSampler.protocol') ?? '', variables)),
+    domain: optionalString(replaceKnownVariables(getTextProp(element, 'HTTPSampler.domain') ?? '', variables)),
+    port: optionalString(replaceKnownVariables(getTextProp(element, 'HTTPSampler.port') ?? '', variables)),
+    path: optionalString(replaceKnownVariables(getTextProp(element, 'HTTPSampler.path') ?? '', variables)),
+    method: optionalString(replaceKnownVariables(getTextProp(element, 'HTTPSampler.method') ?? '', variables))?.toUpperCase()
   });
+}
+
+function extractConstantTimerDelay(element: XmlNode): number {
+  return parsePositiveInteger(getTextProp(element, 'ConstantTimer.delay'), 0);
+}
+
+function extractResponseAssertion(element: XmlNode, sourcePath: string): ResponseAssertionPlan {
+  const name = getAttribute(element, '@_testname') ?? 'Response Assertion';
+  const field = getTextProp(element, 'Assertion.test_field') ?? 'Assertion.response_data';
+  const rule = parseAssertionRule(getTextProp(element, 'Assertion.test_type'));
+  const patterns = getAssertionPatterns(element);
+  const supported = isSupportedAssertion(field, rule, patterns);
+
+  return {
+    name,
+    field,
+    rule,
+    patterns,
+    supported,
+    sourcePath,
+    note: supported
+      ? undefined
+      : `TODO: manually migrate response assertion "${name}" (${field}, ${rule}).`
+  };
+}
+
+function parseAssertionRule(value: string | undefined): AssertionRule {
+  const type = parsePositiveInteger(value, 0);
+
+  if ((type & 4) === 4 || (type & 32) === 32) {
+    return 'unsupported';
+  }
+
+  if ((type & 8) === 8) {
+    return 'equals';
+  }
+
+  if ((type & 16) === 16) {
+    return 'substring';
+  }
+
+  if ((type & 2) === 2) {
+    return 'contains';
+  }
+
+  if ((type & 1) === 1) {
+    return 'matches';
+  }
+
+  return 'unsupported';
+}
+
+function getAssertionPatterns(element: XmlNode): string[] {
+  const patterns: string[] = [];
+
+  function visit(node: XmlNode): void {
+    const tag = getTagName(node);
+    if (tag === 'stringProp') {
+      const name = getAttribute(node, '@_name');
+      if (name !== undefined && name !== 'Assertion.test_field') {
+        const value = getText(node);
+        if (value !== undefined) {
+          patterns.push(value);
+        }
+      }
+    }
+
+    for (const child of getChildren(node)) {
+      visit(child);
+    }
+  }
+
+  for (const child of getChildren(element)) {
+    const propName = getAttribute(child, '@_name');
+    if (getTagName(child) === 'collectionProp' && (propName === 'Asserion.test_strings' || propName === 'Assertion.test_strings')) {
+      visit(child);
+    }
+  }
+
+  return patterns;
+}
+
+function isSupportedAssertion(field: string, rule: AssertionRule, patterns: string[]): boolean {
+  if (patterns.length === 0) {
+    return false;
+  }
+
+  if (field === 'Assertion.response_code') {
+    return rule === 'equals' && patterns.every((pattern) => /^\d{3}$/.test(pattern));
+  }
+
+  if (field === 'Assertion.response_data' || field === 'Assertion.response_headers') {
+    return rule === 'equals' || rule === 'substring';
+  }
+
+  return false;
 }
 
 function extractArguments(element: XmlNode): { mode: 'query' | 'body'; values: Record<string, string>; body?: string } {
@@ -496,7 +668,7 @@ function extractArguments(element: XmlNode): { mode: 'query' | 'body'; values: R
   const rawBody = getTextProp(element, 'Argument.value') ?? getTextProp(element, 'HTTPSampler.body');
   const postBodyRaw = getTextProp(element, 'HTTPSampler.postBodyRaw') === 'true';
 
-  for (const argument of findElementProps(element, 'HTTPArgument')) {
+  for (const argument of [...findElementProps(element, 'HTTPArgument'), ...findElementProps(element, 'Argument')]) {
     const name = getTextProp(argument, 'Argument.name') ?? '';
     const value = getTextProp(argument, 'Argument.value') ?? '';
 
@@ -680,7 +852,10 @@ function emptyConfig(): ScopedConfig {
     headers: {},
     variables: {},
     csvDataSets: [],
-    httpDefaults: {}
+    httpDefaults: {},
+    constantDelayMs: 0,
+    assertions: [],
+    migrationNotes: []
   };
 }
 
@@ -689,7 +864,10 @@ function mergeConfig(base: ScopedConfig, next: ScopedConfig): ScopedConfig {
     headers: { ...base.headers, ...next.headers },
     variables: { ...base.variables, ...next.variables },
     csvDataSets: [...base.csvDataSets, ...next.csvDataSets],
-    httpDefaults: mergeHttpDefaults(base.httpDefaults, next.httpDefaults)
+    httpDefaults: mergeHttpDefaults(base.httpDefaults, next.httpDefaults),
+    constantDelayMs: base.constantDelayMs + next.constantDelayMs,
+    assertions: [...base.assertions, ...next.assertions],
+    migrationNotes: [...base.migrationNotes, ...next.migrationNotes]
   };
 }
 
@@ -741,8 +919,49 @@ function optionalString(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function resolveRequestValue(
+  explicitValue: string | undefined,
+  defaultValue: string | undefined,
+  variables: Record<string, string>
+): string | undefined {
+  const value = optionalString(explicitValue) ?? defaultValue;
+  return value === undefined ? undefined : replaceKnownVariables(value, variables);
+}
+
+function replaceRecordVariables(
+  values: Record<string, string>,
+  variables: Record<string, string>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [
+      replaceKnownVariables(key, variables),
+      replaceKnownVariables(value, variables)
+    ])
+  );
+}
+
+function replaceKnownVariables(value: string, variables: Record<string, string>): string {
+  return value.replace(/\$\{([A-Za-z_][\w.-]*)\}/g, (match, name: string) => variables[name] ?? match);
+}
+
 function hasHeader(headers: Record<string, string>, name: string): boolean {
   return Object.keys(headers).some((headerName) => headerName.toLowerCase() === name.toLowerCase());
+}
+
+function requestHasUnresolvedVariables(request: HttpRequestPlan): boolean {
+  const values = [
+    request.protocol,
+    request.domain,
+    request.port,
+    request.path,
+    request.body,
+    ...Object.keys(request.query),
+    ...Object.values(request.query),
+    ...Object.keys(request.headers),
+    ...Object.values(request.headers)
+  ];
+
+  return values.some((value) => value !== undefined && /\$\{[^}]+\}/.test(value));
 }
 
 function normalizePath(value: string): string {
@@ -796,6 +1015,57 @@ function formatK6HttpCall(method: string, hasBody: boolean, params: string): str
   }
 }
 
+function formatK6Checks(checks: K6CheckPlan[]): string {
+  const effectiveChecks = checks.length > 0
+    ? checks
+    : [{ label: 'status is below 400', expression: 'result.status < 400', sourcePath: 'default' }];
+
+  const lines = effectiveChecks.map((check) => `    ${quoteJs(check.label)}: (result) => ${check.expression}`);
+  return `  check(response, {\n${lines.join(',\n')}\n  });`;
+}
+
+function assertionToK6Checks(assertion: ResponseAssertionPlan): K6CheckPlan[] {
+  if (!assertion.supported) {
+    return [];
+  }
+
+  return assertion.patterns.map((pattern) => ({
+    label: `${assertion.name}: ${formatAssertionLabel(assertion.field, assertion.rule, pattern)}`,
+    expression: formatAssertionExpression(assertion.field, assertion.rule, pattern),
+    sourcePath: assertion.sourcePath
+  }));
+}
+
+function formatAssertionLabel(field: string, rule: AssertionRule, pattern: string): string {
+  if (field === 'Assertion.response_code') {
+    return `status equals ${pattern}`;
+  }
+
+  if (field === 'Assertion.response_headers') {
+    return `headers ${rule} ${pattern}`;
+  }
+
+  return `body ${rule} ${pattern}`;
+}
+
+function formatAssertionExpression(field: string, rule: AssertionRule, pattern: string): string {
+  if (field === 'Assertion.response_code') {
+    return `result.status === ${Number(pattern)}`;
+  }
+
+  if (field === 'Assertion.response_headers') {
+    const target = 'JSON.stringify(result.headers || {})';
+    return rule === 'equals'
+      ? `${target} === ${quoteJs(pattern)}`
+      : `${target}.includes(${quoteJs(pattern)})`;
+  }
+
+  const body = '(result.body || "")';
+  return rule === 'equals'
+    ? `${body} === ${quoteJs(pattern)}`
+    : `${body}.includes(${quoteJs(pattern)})`;
+}
+
 function buildK6UrlExpression(request: HttpRequestPlan): string {
   const pathWithQuery = appendQuery(request.path, request.query);
 
@@ -829,6 +1099,11 @@ function buildK6Params(headers: Record<string, string>): string {
   }
 
   return JSON.stringify({ headers }, null, 2).replace(/\n/g, '\n  ');
+}
+
+function formatSeconds(milliseconds: number): string {
+  const seconds = milliseconds / 1000;
+  return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function quoteJs(value: string): string {

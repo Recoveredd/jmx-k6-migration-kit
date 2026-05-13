@@ -162,6 +162,57 @@ describe('analyzeJmx', () => {
       path: '/from-defaults'
     });
   });
+
+  it('replaces simple user-defined variables in supported request fields', () => {
+    const analysis = analyzeJmx(withPlanChildren(`
+      <Arguments guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="host" elementType="Argument">
+            <stringProp name="Argument.name">host</stringProp>
+            <stringProp name="Argument.value">api.variables.test</stringProp>
+          </elementProp>
+          <elementProp name="tenant" elementType="Argument">
+            <stringProp name="Argument.name">tenant</stringProp>
+            <stringProp name="Argument.value">northwind</stringProp>
+          </elementProp>
+        </collectionProp>
+      </Arguments>
+      <hashTree/>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">1</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">1</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Tenant API" enabled="true">
+          <stringProp name="HTTPSampler.domain">\${host}</stringProp>
+          <stringProp name="HTTPSampler.path">/tenants/\${tenant}</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+    `));
+
+    expect(analysis.httpRequests[0]).toMatchObject({
+      domain: 'api.variables.test',
+      path: '/tenants/northwind'
+    });
+  });
+
+  it('warns when JMeter variables cannot be resolved statically', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Dynamic API" enabled="true">
+        <stringProp name="HTTPSampler.domain">\${dynamicHost}</stringProp>
+        <stringProp name="HTTPSampler.path">/v1/items</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+
+    expect(analysis.findings.some((finding) => finding.code === 'unresolved-variable')).toBe(true);
+  });
 });
 
 describe('generateK6Script', () => {
@@ -249,6 +300,83 @@ describe('generateK6Script', () => {
     expect(result.script).toContain('const body = "email=ada%40example.test&plan=pro";');
     expect(result.script).toContain('"Content-Type": "application/x-www-form-urlencoded"');
     expect(result.script).not.toContain('/submit?email=');
+  });
+
+  it('turns supported response assertions into k6 checks', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Healthcheck" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/health</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree>
+        <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="HTTP 200" enabled="true">
+          <collectionProp name="Asserion.test_strings">
+            <stringProp name="49586">200</stringProp>
+          </collectionProp>
+          <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+          <intProp name="Assertion.test_type">8</intProp>
+        </ResponseAssertion>
+        <hashTree/>
+        <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Body contains ok" enabled="true">
+          <collectionProp name="Asserion.test_strings">
+            <stringProp name="3548">ok</stringProp>
+          </collectionProp>
+          <stringProp name="Assertion.test_field">Assertion.response_data</stringProp>
+          <intProp name="Assertion.test_type">16</intProp>
+        </ResponseAssertion>
+        <hashTree/>
+      </hashTree>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(analysis.findings.some((finding) => finding.code === 'assertion-partial')).toBe(false);
+    expect(result.script).toContain('"HTTP 200: status equals 200": (result) => result.status === 200');
+    expect(result.script).toContain('"Body contains ok: body substring ok": (result) => (result.body || "").includes("ok")');
+  });
+
+  it('turns constant timers into pre-request sleeps', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="Think time" enabled="true">
+        <stringProp name="ConstantTimer.delay">250</stringProp>
+      </ConstantTimer>
+      <hashTree/>
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="With delay" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/delayed</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree/>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(analysis.httpRequests[0]?.delayMs).toBe(250);
+    expect(result.script).toContain('sleep(0.25);');
+    expect(result.script.indexOf('sleep(0.25);')).toBeLessThan(result.script.indexOf('const response = http.get'));
+  });
+
+  it('keeps unsupported assertion modifiers manual', () => {
+    const analysis = analyzeJmx(withThreadChildren(`
+      <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Healthcheck" enabled="true">
+        <stringProp name="HTTPSampler.domain">api.example.test</stringProp>
+        <stringProp name="HTTPSampler.path">/health</stringProp>
+        <stringProp name="HTTPSampler.method">GET</stringProp>
+      </HTTPSamplerProxy>
+      <hashTree>
+        <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Not 500" enabled="true">
+          <collectionProp name="Asserion.test_strings">
+            <stringProp name="52469">500</stringProp>
+          </collectionProp>
+          <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+          <intProp name="Assertion.test_type">12</intProp>
+        </ResponseAssertion>
+        <hashTree/>
+      </hashTree>
+    `));
+    const result = generateK6Script(analysis);
+
+    expect(analysis.findings.some((finding) => finding.code === 'assertion-partial')).toBe(true);
+    expect(result.script).toContain('TODO: manually migrate response assertion "Not 500"');
   });
 
   it('fails generation clearly when no enabled HTTP request exists', () => {

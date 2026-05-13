@@ -101,10 +101,12 @@ The goal is reliable partial migration, not full JMeter emulation.
 | `HTTP Request Defaults` / `ConfigTestElement` | Supported | Applies default protocol, domain, port, path and method within the current JMeter tree scope. |
 | `HeaderManager` | Supported | Headers are applied through JMeter tree scope where possible. |
 | `Arguments` | Supported | `GET`/`DELETE` parameters become URL query params; `POST`/`PUT`/`PATCH` parameters become form bodies unless JMeter raw body mode is used. |
+| User Defined Variables | Supported | Simple `${name}` placeholders are replaced when the value is statically defined in an `Arguments` element in scope. Unresolved variables are reported. |
+| `ResponseAssertion` | Partial | Converts simple response-code equality and body/header equals or substring assertions into k6 `check()` calls. Regex, NOT and OR assertions stay manual. |
+| `ConstantTimer` | Partial | Converts fixed millisecond delays into `sleep(seconds)` before each sampler in scope. |
 | `ThreadGroup` | Partial | `vus`, loops and ramp-up are converted into simple k6 options. Review complex schedules manually. |
 | `CSVDataSet` | Partial | Detected and reported, but shared arrays and `open()` loading must be reviewed manually. |
-| `ResponseAssertion` | Partial | Detected and reported. Recreate assertions with k6 `check()`. |
-| Timers | Partial | Detected, but timing behavior should be reviewed manually. |
+| Other timers | Partial | Detected, but timing behavior should be reviewed manually. |
 | Plugins and custom samplers | Unsupported | Reported as migration work items instead of being silently ignored. |
 
 ## Professional migration workflow
